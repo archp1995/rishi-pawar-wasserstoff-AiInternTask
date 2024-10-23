@@ -1,0 +1,167 @@
+import requests
+import PyPDF2
+from pymongo import MongoClient
+import nltk
+from concurrent.futures import ThreadPoolExecutor
+from sklearn.feature_extraction.text import TfidfVectorizer
+from nltk.tokenize import sent_tokenize
+import os
+from fpdf import FPDF
+
+# Download NLTK resources
+nltk.download('punkt')
+
+# 1. Download PDFs from URLs
+def download_pdf(url, filename):
+    try:
+        response = requests.get(url)
+        with open(filename, 'wb') as file:
+            file.write(response.content)
+        print(f"Downloaded: {filename}")
+    except Exception as e:
+        print(f"Error downloading {filename}: {e}")
+
+# 2. Extract text from PDF
+def extract_text_from_pdf(pdf_path):
+    try:
+        with open(pdf_path, 'rb') as file:
+            reader = PyPDF2.PdfReader(file)
+            text = ""
+            for page in reader.pages:
+                text += page.extract_text() or ""  # Handle case where extraction might fail
+        return text
+    except Exception as e:
+        print(f"Error extracting text from {pdf_path}: {e}")
+        return ""
+
+# 3. Summarize Text
+def summarize_text(text, num_sentences=5):
+    sentences = sent_tokenize(text)
+    if len(sentences) <= num_sentences:
+        return text  # No need to summarize if the text is short
+    return " ".join(sentences[:num_sentences])
+
+# 4. Extract Keywords using TF-IDF
+def extract_keywords(text, num_keywords=5):
+    vectorizer = TfidfVectorizer(stop_words='english')
+    vectors = vectorizer.fit_transform([text])
+    feature_names = vectorizer.get_feature_names_out()
+    scores = vectors.toarray().flatten()
+    top_keywords_indices = scores.argsort()[-num_keywords:][::-1]
+    return [feature_names[i] for i in top_keywords_indices]
+
+# 5. MongoDB Connection Setup
+client = MongoClient('mongodb://localhost:27017/')
+db = client['pdf_database']
+collection = db['summaries']
+
+# Save to MongoDB
+def save_to_mongodb(data):
+    try:
+        collection.insert_one(data)
+        print(f"Saved to MongoDB: {data['filename']}")
+    except Exception as e:
+        print(f"Error saving to MongoDB: {e}")
+
+# 6. Process a single PDF (Download, Extract, Summarize, Keyword Extraction, Save)
+def process_pdf(pdf_url, filename):
+    download_pdf(pdf_url, filename)
+    text = extract_text_from_pdf(filename)
+    if text:
+        summary = summarize_text(text)
+        keywords = extract_keywords(text)
+        # Save to MongoDB
+        data = {
+            'filename': filename,
+            'summary': summary,
+            'keywords': keywords,
+            'url': pdf_url
+        }
+        save_to_mongodb(data)
+    # Clean up - remove the downloaded PDF
+    if os.path.exists(filename):
+        os.remove(filename)
+
+# 7. Process multiple PDFs concurrently
+def process_multiple_pdfs(pdf_dict):
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = []
+        for i, (pdf_name, pdf_url) in enumerate(pdf_dict.items(), 1):
+            filename = f"document_{i}.pdf"
+            futures.append(executor.submit(process_pdf, pdf_url, filename))
+
+        for future in futures:
+            future.result()
+
+# 8. Query MongoDB for saved documents
+def query_mongodb():
+    # Print all documents in the collection
+    documents = collection.find()
+    for document in documents:
+        print(document)
+
+    # Example search term
+    search_term = input("Enter a keyword to search for: ")  # User input for search term
+
+    # Searching for documents containing the specified keyword
+    results = collection.find({"keywords": {"$in": [search_term]}})
+    for result in results:
+        print(result)
+
+# 9. Retrieve summaries for PDF creation
+def retrieve_summaries():
+    documents = collection.find()
+    summaries = []
+    for document in documents:
+        summaries.append({
+            'filename': document['filename'],
+            'summary': document['summary'],
+            'keywords': ", ".join(document['keywords']),
+            'url': document['url']
+        })
+    return summaries
+
+# Function to clean text for PDF generation
+def clean_text(text):
+    return text.encode('latin-1', 'ignore').decode('latin-1')
+
+# 10. Create PDF from summaries
+def create_pdf(summaries, pdf_filename):
+    pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+
+    pdf.set_font("Arial", size=12)
+
+    for summary in summaries:
+        pdf.cell(200, 10, txt=f"Filename: {clean_text(summary['filename'])}", ln=True)
+        pdf.cell(200, 10, txt=f"Summary: {clean_text(summary['summary'])}", ln=True)
+        pdf.cell(200, 10, txt=f"Keywords: {clean_text(summary['keywords'])}", ln=True)
+        pdf.cell(200, 10, txt=f"URL: {clean_text(summary['url'])}", ln=True)
+        pdf.cell(200, 10, ln=True)  # Add a blank line
+
+    pdf.output(pdf_filename)
+
+# URLs dictionary (example PDFs)
+pdf_dict = {
+    "pdf1": "https://example.com/document1.pdf",
+    "pdf2": "https://example.com/document2.pdf", 
+    "pdf3": "https://example.com/document3.pdf", 
+    "pdf4": "https://example.com/document4.pdf", 
+    "pdf5": "https://example.com/document5.pdf", 
+    "pdf6": "https://example.com/document6.pdf", 
+    "pdf7": "https://example.com/document7.pdf", 
+    "pdf8": "https://example.com/document8.pdf", 
+    "pdf9": "https://example.com/document9.pdf", 
+    "pdf10": "https://example.com/document10.pdf"
+}
+
+# Run the processing
+process_multiple_pdfs(pdf_dict)
+
+# Run MongoDB query
+query_mongodb()
+
+# Retrieve summaries and create a PDF
+summaries = retrieve_summaries()
+create_pdf(summaries, "summaries_report.pdf")
